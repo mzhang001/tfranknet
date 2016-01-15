@@ -5,7 +5,6 @@ License: GNU ver.2.0
 
 """
 
-
 from __future__ import division
 from __future__ import print_function
 from __future__ import absolute_import
@@ -115,25 +114,25 @@ class RankNet(object):
                                         dtypes=["float", "float"],
                                         shapes=[[fdim], [fdim]])
             #input data
-            data1, data2 = q.dequeue_many(batch_size)
+            data1, data2 = q.dequeue_many(batch_size, name="inputs")
 
             #setting weights and biases
             self.weights = weights = []
             self.biases = biases = []
             for n in xrange(layer_num-1):
-                scope_name = "layer"+str(n)
                 w_shape = [layer_units[n], layer_units[n+1]]
                 b_shape = [layer_units[n+1]]
-                w = self._get_weight_variable(w_shape, scope_name)
-                b = self._get_bias_variable(b_shape, scope_name)
+                w = self._get_weight_variable(w_shape, n)
+                b = self._get_bias_variable(b_shape, n)
                 weights.append(w)
                 biases.append(b)
 
-            s1 = self._obtain_score(data1, weights, biases, act_func)
-            s2 = self._obtain_score(data2, weights, biases, act_func)
-            self.cost = cost = tf.reduce_sum(
-                                tf.log(1 + tf.exp(-tf.nn.sigmoid(s1-s2))))
-            optimizer = tf.train.AdamOptimizer(lr)
+            s1 = self._obtain_score(data1, weights, biases, act_func, 1)
+            s2 = self._obtain_score(data2, weights, biases, act_func, 2)
+            with tf.name_scope("cost"):
+                self.cost = cost = tf.reduce_sum(
+                                    tf.log(1 + tf.exp(-tf.nn.sigmoid(s1-s2))))
+                optimizer = tf.train.AdamOptimizer(lr)
             self.optimize = optimizer.minimize(cost)
 
             tf.scalar_summary("cost", cost)
@@ -144,32 +143,33 @@ class RankNet(object):
             self.sess.run(self.init_op)
 
     @classmethod
-    def _obtain_score(cls, data, weights, biases, act_func):
+    def _obtain_score(cls, data, weights, biases, act_func, num):
         num_layer = len(weights) + 1
         outputs = [data]
         for n in xrange(num_layer-1):
-            input_n = outputs[n]
-            w_n = weights[n]
-            b_n = biases[n]
-            output_n = act_func(tf.matmul(input_n, w_n) + b_n)
-            outputs.append(output_n)
+            with tf.name_scope("layer"+str(n)+"_"+str(num)):
+                input_n = outputs[n]
+                w_n = weights[n]
+                b_n = biases[n]
+                output_n = act_func(tf.matmul(input_n, w_n) + b_n)
+                outputs.append(output_n)
         score = outputs[-1]
         return score
 
     @classmethod
-    def _get_weight_variable(cls, shape, scope_name, stddev=1.0):
-        with tf.variable_scope(scope_name):
-            initializer = tf.random_normal_initializer(mean=0.0,
-                                                       stddev=stddev)
-            w = tf.get_variable(name="weight", shape=shape,
-                                dtype="float")
+    def _get_weight_variable(cls, shape, layer, stddev=1.0):
+        initializer = tf.random_normal_initializer(mean=0.0,
+                                                   stddev=stddev)
+        name = "weight" + str(layer)
+        w = tf.get_variable(name=name, shape=shape,
+                            dtype="float")
         return w
 
     @classmethod
-    def _get_bias_variable(cls, shape, scope_name):
-        with tf.variable_scope(scope_name):
-            init = tf.zeros_initializer(shape=shape)
-            b = tf.Variable(init, name="bias")
+    def _get_bias_variable(cls, shape, layer):
+        init = tf.zeros_initializer(shape=shape)
+        name = "bias" + str(layer)
+        b = tf.Variable(init, name=name)
         return b
 
     def _set_weight(weight, layer):
