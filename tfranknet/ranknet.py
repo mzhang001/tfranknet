@@ -44,6 +44,8 @@ class RankNet(object):
         self.min_after_dequeue = min_after_dequeue
         self.threads = threads
         self.verbose = verbose
+        self.batch_size = batch_size
+        self.logdir = logdir
 
     def fit(self, data1, data2, pretraining=False, init=True):
         """learn the neural network
@@ -60,15 +62,16 @@ class RankNet(object):
         if shape1 != shape2:
             raise ValueError("'data1' and 'data2' mush have the same shape")
 
-        self.fdim = shape[1]
-        self.data_size = shape[0]
+        self.fdim = shape1[1]
+        self.data_size = shape1[0]
         if init:
             self._setup_training()
 
         #set data to enqueue op(not executed yet)
-        data1 = np.array(data1)[:self.q_capacity]
-        data2 = np.array(data2)[:self.q_capacity]
-        enq = self.queue.enqueue_many((data1, data2))
+        data1 = np.array(data1)
+        data2 = np.array(data2)
+        with self.graph.as_default():
+            enq = self.queue.enqueue_many((data1, data2))
         #Not used after defining enqueue op
         del data1
         del data2
@@ -81,7 +84,7 @@ class RankNet(object):
             writer = tf.train.SummaryWriter(self.logdir, sess.graph_def)
         #Run the training loop, controlling termination with the coord
         try:
-            for step in xrange(max_steps):
+            for step in xrange(self.max_steps):
                 if coord.should_stop():
                     break
                 cost, sm, _ = sess.run([self.cost, self.summary,
@@ -93,7 +96,7 @@ class RankNet(object):
         except Exception as e:
             coord.request_stop(e)
         coord.request_stop()
-        coord.join(threads)
+        coord.join(enqueue_threads)
 
     def _setup_training(self):
         self.graph = tf.Graph()
@@ -107,17 +110,17 @@ class RankNet(object):
             lr = self.learning_rate
 
             #make Queue for getting batch
-            self.queue = q = tf.RandomShuffleQueue(self.q_capacity,
-                                                   self.min_after_dequeue,
-                                                    ["float", "float"])
-
+            self.queue = q = tf.RandomShuffleQueue(capacity=self.q_capacity,
+                                        min_after_dequeue=self.min_after_dequeue,
+                                        dtypes=["float", "float"],
+                                        shapes=[[fdim], [fdim]])
             #input data
             data1, data2 = q.dequeue_many(batch_size)
 
             #setting weights and biases
             self.weights = weights = []
             self.biases = biases = []
-            for n in range(layer_num-1):
+            for n in xrange(layer_num-1):
                 scope_name = "layer"+str(n)
                 w_shape = [layer_units[n], layer_units[n+1]]
                 b_shape = [layer_units[n+1]]
@@ -126,16 +129,17 @@ class RankNet(object):
                 weights.append(w)
                 biases.append(b)
 
-            s1 = self._obtain_score(data1)
-            s2 = self._obtain_score(data2)
-            self.cost = cost = tf.log(1 + tf.exp(-tf.nn.sigmoid(s1-s2)))
-            optimizer = tf.AdamOptimizer(lr)
+            s1 = self._obtain_score(data1, weights, biases, act_func)
+            s2 = self._obtain_score(data2, weights, biases, act_func)
+            self.cost = cost = tf.reduce_sum(
+                                tf.log(1 + tf.exp(-tf.nn.sigmoid(s1-s2))))
+            optimizer = tf.train.AdamOptimizer(lr)
             self.optimize = optimizer.minimize(cost)
 
             tf.scalar_summary("cost", cost)
             self.summary = tf.merge_all_summaries()
 
-            self.init_op = tf.initalize_all_variables()
+            self.init_op = tf.initialize_all_variables()
             self.sess = tf.Session()
             self.sess.run(self.init_op)
 
@@ -143,8 +147,8 @@ class RankNet(object):
     def _obtain_score(cls, data, weights, biases, act_func):
         num_layer = len(weights) + 1
         outputs = [data]
-        for n in range(num_layer-1):
-            input_n = outputs[n-1]
+        for n in xrange(num_layer-1):
+            input_n = outputs[n]
             w_n = weights[n]
             b_n = biases[n]
             output_n = act_func(tf.matmul(input_n, w_n) + b_n)
@@ -154,7 +158,7 @@ class RankNet(object):
 
     @classmethod
     def _get_weight_variable(cls, shape, scope_name, stddev=1.0):
-        with tf.name_scope(scope_name):
+        with tf.variable_scope(scope_name):
             initializer = tf.random_normal_initializer(mean=0.0,
                                                        stddev=stddev)
             w = tf.get_variable(name="weight", shape=shape,
@@ -163,10 +167,9 @@ class RankNet(object):
 
     @classmethod
     def _get_bias_variable(cls, shape, scope_name):
-        with tf.name_scope(scope_name):
-            initializer = tf.zeros_initializer(shape=shape)
-            b = tf.get_variable(name="bias", shape=shape,
-                                initializer=initializer)
+        with tf.variable_scope(scope_name):
+            init = tf.zeros_initializer(shape=shape)
+            b = tf.Variable(init, name="bias")
         return b
 
     def _set_weight(weight, layer):
