@@ -1,15 +1,14 @@
-"""RankNet on TensorFlow
+"""RankNet on TensorFlow"""
 
-Authors: NUKUI Shun<nukui.s@ai.cs.titech.ac.jp>
-License: GNU ver.2.0
-
-"""
+#Authors: NUKUI Shun<nukui.s@ai.cs.titech.ac.jp>
+#License : GNU General Public License v2.0
 
 from __future__ import division
 from __future__ import print_function
 from __future__ import absolute_import
 
 from six.moves import xrange
+
 import numpy as np
 from sklearn.base import BaseEstimator
 import tensorflow as tf
@@ -47,8 +46,9 @@ class RankNet(BaseEstimator):
         self.verbose = verbose
         self.batch_size = batch_size
         self.logdir = logdir
+        self.layer_num = len(hidden_units) + 2
 
-    def fit(self, data, pretraining=False, init=True, label=None):
+    def fit(self, data, pretraining=True, init=True, label=None):
         """Learn the ranking neural network
             The ranks of data1[i] are labeled higher than data2[i]
 
@@ -70,9 +70,40 @@ class RankNet(BaseEstimator):
         self.fdim = shape1[1]
         self.data_size = shape1[0]
         if init:
+            #prepare a training graph and initialize
+            self._setup_base_graph()
             self._setup_training()
             self._setup_prediction()
+            if pretraining:
+                self._setup_pretraining()
+            self.sess.run(self.init_op)
+        if pretraining:
+            #pretrain variables by stacked AutoEncoder
+            self.pretrain(np.append(data1, data2, axis=0))
+        #fine tuning
+        self._fine_tuning(data1, data2)
 
+    def pretrain(self, data):
+        layer_num = self.layer_num
+        max_steps = self.max_steps
+        batch_size = self.batch_size
+        data_size = data.shape[0]
+        sess = self.sess
+        pretrain_layer = self.pretrain_layer
+        for n in xrange(layer_num-2):
+            np.random.shuffle(data)
+            #train loop
+            for step in xrange(max_steps):
+                start = step * batch_size
+                stop = (step+1) * batch_size
+                if start >= data_size:
+                    break
+                batch = data[start: stop]
+                sess.run(pretrain_layer[n],
+                        feed_dict={self.pt_input: batch})
+            data = sess.run(self.encode[n], feed_dict={self.pt_input: data})
+
+    def _fine_tuning(self, data1, data2):
         #set data to enqueue op(not executed yet)
         data1 = np.array(data1)
         data2 = np.array(data2)
@@ -103,7 +134,6 @@ class RankNet(BaseEstimator):
             coord.request_stop(e)
         coord.request_stop()
         coord.join(enqueue_threads)
-        #prepare prediction
 
     def predict(self, data):
         """Predict whether data1[i] is higher rank than data2[i]
@@ -130,7 +160,10 @@ class RankNet(BaseEstimator):
         scores = self.sess.run(self.score, feed_dict=feed_dict)
         return scores
 
-    def _setup_training(self):
+    def _setup_base_graph(self):
+        """
+        Set up queue, variables and session
+        """
         self.graph = tf.Graph()
         with self.graph.as_default() as g:
             fdim = self.fdim
@@ -138,9 +171,6 @@ class RankNet(BaseEstimator):
             hidden_units = self.hidden_units
             layer_units = [fdim] + hidden_units + [1]
             layer_num = len(layer_units)
-            act_func = ACTIVATE_FUNC[self.activate_func]
-            sigma = self.sigma
-            lr = self.learning_rate
 
             #make Queue for getting batch
             self.queue = q = tf.RandomShuffleQueue(capacity=self.q_capacity,
@@ -148,7 +178,7 @@ class RankNet(BaseEstimator):
                                         dtypes=["float", "float"],
                                         shapes=[[fdim], [fdim]])
             #input data
-            data1, data2 = q.dequeue_many(batch_size, name="inputs")
+            self.data1, self.data2 = q.dequeue_many(batch_size, name="inputs")
 
             #setting weights and biases
             self.weights = weights = []
@@ -160,6 +190,24 @@ class RankNet(BaseEstimator):
                 b = self._get_bias_variable(b_shape, n)
                 weights.append(w)
                 biases.append(b)
+
+            #Create session and inialize variables
+            self.init_op = tf.initialize_all_variables()
+            self.sess = tf.Session()
+            self.sess.run(self.init_op)
+
+    def _setup_training(self):
+        """
+        Set up a data flow graph for fine tuning
+        """
+        with self.graph.as_default() as g:
+            layer_num = self.layer_num
+            act_func = ACTIVATE_FUNC[self.activate_func]
+            sigma = self.sigma
+            lr = self.learning_rate
+            weights = self.weights
+            biases = self.biases
+            data1, data2 = self.data1, self.data2
 
             with tf.name_scope("training"):
                 s1 = self._obtain_score(data1, weights, biases, act_func, "1")
@@ -178,9 +226,53 @@ class RankNet(BaseEstimator):
             tf.scalar_summary("cost", cost)
             self.summary = tf.merge_all_summaries()
 
+    def _setup_pretraining(self):
+        """
+        Set up a data flow graph for pretraining by sAE
+        """
+        with self.graph.as_default():
+            fdim = self.fdim
+            weights = self.weights
+            biases = self.biases
+            layer_num = self.layer_num
+            lr = self.learning_rate
+            act_func = ACTIVATE_FUNC[self.activate_func]
+
+            self.pt_input = input_ = tf.placeholder("float", shape=[None, None],
+                                                    name="input_to_ae")
+            self.pretrain_layer = []
+            self.encode = []
+            with tf.name_scope("pretraing"):
+                optimizer = tf.train.GradientDescentOptimizer(lr)
+                for n in xrange(layer_num-2):
+                    w = weights[n]
+                    b = biases[n]
+                    label = str(n)
+                    encoded, recon_err = self._get_reconstruction_error(input_,
+                                                                        w, b,
+                                                                        act_func,
+                                                                        label)
+                    opt_op = optimizer.minimize(recon_err)
+                    self.pretrain_layer.append(opt_op)
+                    self.encode.append(encoded)
             self.init_op = tf.initialize_all_variables()
-            self.sess = tf.Session()
-            self.sess.run(self.init_op)
+
+    @classmethod
+    def _get_reconstruction_error(cls, input_, weight, bias, act_func, label):
+        """
+        Get encoded data and reconstruction error
+        """
+        with tf.variable_scope(label):
+            b_shape = weight.get_shape()[0:1]
+            #Only used for decoding
+            bias_aux = cls._get_bias_variable(b_shape, "_aux_"+label)
+        with tf.name_scope("AE"+label):
+            encoded = act_func(tf.matmul(input_, weight) + bias)
+            w_T = tf.transpose(weight)
+            decoded = act_func(tf.matmul(encoded, w_T) + bias_aux)
+        loss = tf.nn.l2_loss(input_ - decoded) + tf.nn.l2_loss(weight)
+        return encoded, loss
+
 
     def _setup_prediction(self):
         with self.graph.as_default():
@@ -214,18 +306,18 @@ class RankNet(BaseEstimator):
         return score
 
     @classmethod
-    def _get_weight_variable(cls, shape, layer, stddev=1.0):
+    def _get_weight_variable(cls, shape, label, stddev=1.0):
         initializer = tf.random_normal_initializer(mean=0.0,
                                                    stddev=stddev)
-        name = "weight" + str(layer)
+        name = "weight" + str(label)
         w = tf.get_variable(name=name, shape=shape,
                             dtype="float")
         return w
 
     @classmethod
-    def _get_bias_variable(cls, shape, layer):
+    def _get_bias_variable(cls, shape, label):
         init = tf.zeros_initializer(shape=shape)
-        name = "bias" + str(layer)
+        name = "bias" + str(label)
         b = tf.Variable(init, name=name)
         return b
 
