@@ -29,7 +29,7 @@ class RankNet(object):
     """
 
     def __init__(self, hidden_units, batch_size=32, activate_func="relu",
-                 learning_rate=0.1, max_steps=1000, verbose=False,
+                 learning_rate=0.01, max_steps=1000, verbose=False,
                  logdir=None, q_capacity=1000000, min_after_dequeue=100,
                  threads=8):
         if not activate_func in ACTIVATE_FUNC:
@@ -47,14 +47,14 @@ class RankNet(object):
         self.logdir = logdir
 
     def fit(self, data1, data2, pretraining=False, init=True):
-        """learn the neural network
+        """Learn the neural network
             The ranks of data1 are labeled higher than data2
 
             Arguments
             ---------------
             data1 : 2-D numpy array or Pandas DataFrame
                     which are higher rank than data2
-            data2 : Must has the same shape as data1
+            data2 : Must have the same shape as data1
         """
         shape1 = tuple(data1.shape)
         shape2 = tuple(data2.shape)
@@ -65,6 +65,7 @@ class RankNet(object):
         self.data_size = shape1[0]
         if init:
             self._setup_training()
+            self._setup_prediction()
 
         #set data to enqueue op(not executed yet)
         data1 = np.array(data1)
@@ -96,6 +97,24 @@ class RankNet(object):
             coord.request_stop(e)
         coord.request_stop()
         coord.join(enqueue_threads)
+        #prepare prediction
+
+    def predict(self, data1, data2):
+        """
+        Predict whether data1[i] is higher rank than data2[i]
+        """
+        prob = self.predict_prob(data1, data2)
+        pred = prob > 0.5
+        return pred
+
+    def predict_prob(self, data1, data2):
+        """
+        Predict probability that data1[i] is higher rank than data2[i]
+        """
+        sess = self.sess
+        feed_dict = {self.input1: data1, self.input2: data2}
+        prob = sess.run(self.prob, feed_dict=feed_dict)
+        return prob
 
     def _setup_training(self):
         self.graph = tf.Graph()
@@ -127,14 +146,20 @@ class RankNet(object):
                 weights.append(w)
                 biases.append(b)
 
-            s1 = self._obtain_score(data1, weights, biases, act_func, 1)
-            s2 = self._obtain_score(data2, weights, biases, act_func, 2)
-            with tf.name_scope("cost"):
-                self.cost = cost = tf.reduce_sum(
-                                    tf.log(1 + tf.exp(-tf.nn.sigmoid(s1-s2))))
-                optimizer = tf.train.AdamOptimizer(lr)
+            with tf.name_scope("training"):
+                s1 = self._obtain_score(data1, weights, biases, act_func, "1")
+                s2 = self._obtain_score(data2, weights, biases, act_func, "2")
+
+                with tf.name_scope("cost"):
+                    self.cost = cost = tf.reduce_sum(
+                                        tf.log(1 + tf.exp(-tf.nn.sigmoid(s1-s2))))
+
+            optimizer = tf.train.GradientDescentOptimizer(lr)
             self.optimize = optimizer.minimize(cost)
 
+            for n in range(layer_num-1):
+                tf.histogram_summary("weight"+str(n), weights[n])
+                tf.histogram_summary("bias"+str(n), biases[n])
             tf.scalar_summary("cost", cost)
             self.summary = tf.merge_all_summaries()
 
@@ -142,12 +167,28 @@ class RankNet(object):
             self.sess = tf.Session()
             self.sess.run(self.init_op)
 
+    def _setup_prediction(self):
+        with self.graph.as_default():
+            fdim = self.fdim
+            self.input1 = inp1 = tf.placeholder("float", shape=[None,fdim],
+                                                name="input1")
+            self.input2 = inp2 = tf.placeholder("float", shape=[None,fdim],
+                                                name="input2")
+            weights = self.weights
+            biases = self.biases
+            act_func = ACTIVATE_FUNC[self.activate_func]
+            with tf.name_scope("prediction"):
+                s1 = self._obtain_score(inp1, weights, biases, act_func, "1")
+                s2 = self._obtain_score(inp2, weights, biases, act_func, "2")
+                with tf.name_scope("probability"):
+                    self.prob = 1 / (1 + tf.exp(-tf.nn.sigmoid(s1-s2)))
+
     @classmethod
-    def _obtain_score(cls, data, weights, biases, act_func, num):
+    def _obtain_score(cls, data, weights, biases, act_func, label):
         num_layer = len(weights) + 1
         outputs = [data]
         for n in xrange(num_layer-1):
-            with tf.name_scope("layer"+str(n)+"_"+str(num)):
+            with tf.name_scope("layer"+str(n)+"_"+label):
                 input_n = outputs[n]
                 w_n = weights[n]
                 b_n = biases[n]
