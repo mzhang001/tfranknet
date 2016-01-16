@@ -12,11 +12,10 @@ rn = RankNet(hidden_units=[20, 10], logdir="testlog",
              learning_rate=0.01)
 data = rn.pack_data(data1, data2)
 
-#cvpred = cross_val_predict(rn, data, label, cv=2)
+cvpred = cross_val_predict(rn, data, label, cv=2)
 
 rn.fit(data)
 
-rn.save("ranknet")
 
 
 if False:
