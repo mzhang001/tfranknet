@@ -7,6 +7,9 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import absolute_import
 
+import os
+import copy
+import pickle
 from six.moves import xrange
 
 import numpy as np
@@ -31,7 +34,7 @@ class RankNet(BaseEstimator):
     def __init__(self, hidden_units, batch_size=32, activate_func="relu",
                  learning_rate=0.01, max_steps=1000, sigma=1.0,
                  logdir=None, q_capacity=1000000, min_after_dequeue=100,
-                 threads=4, verbose=False):
+                 threads=4, verbose=False, initialize=True):
         if not activate_func in ACTIVATE_FUNC:
             raise ValueError("'activate_func' must be in"
                             "['rele', 'sigmoid'")
@@ -47,8 +50,10 @@ class RankNet(BaseEstimator):
         self.batch_size = batch_size
         self.logdir = logdir
         self.layer_num = len(hidden_units) + 2
+        self.initialize = initialize
+        self.initialized = False
 
-    def fit(self, data, pretraining=True, init=True, label=None):
+    def fit(self, data, pretraining=True, label=None):
         """Learn the ranking neural network
             The ranks of data1[i] are labeled higher than data2[i]
 
@@ -69,7 +74,7 @@ class RankNet(BaseEstimator):
 
         self.fdim = shape1[1]
         self.data_size = shape1[0]
-        if init:
+        if self.initialize or (not self.initialized):
             #prepare a training graph and initialize
             self._setup_base_graph()
             self._setup_training()
@@ -77,6 +82,7 @@ class RankNet(BaseEstimator):
             if pretraining:
                 self._setup_pretraining()
             self.sess.run(self.init_op)
+            self.initialized = True
         if pretraining:
             #pretrain variables by stacked AutoEncoder
             self.pretrain(np.append(data1, data2, axis=0))
@@ -180,21 +186,24 @@ class RankNet(BaseEstimator):
             #input data
             self.data1, self.data2 = q.dequeue_many(batch_size, name="inputs")
 
-            #setting weights and biases
-            self.weights = weights = []
-            self.biases = biases = []
-            for n in xrange(layer_num-1):
-                w_shape = [layer_units[n], layer_units[n+1]]
-                b_shape = [layer_units[n+1]]
-                w = self._get_weight_variable(w_shape, n)
-                b = self._get_bias_variable(b_shape, n)
-                weights.append(w)
-                biases.append(b)
-
+            self._setup_variables()
             #Create session and inialize variables
             self.init_op = tf.initialize_all_variables()
             self.sess = tf.Session()
-            self.sess.run(self.init_op)
+
+    def _setup_variables(self):
+        hidden_units = self.hidden_units
+        layer_num = len(hidden_units) + 2
+        #setting weights and biases
+        self.weights = weights = []
+        self.biases = biases = []
+        for n in xrange(layer_num-1):
+            w_shape = [layer_units[n], layer_units[n+1]]
+            b_shape = [layer_units[n+1]]
+            w = self._get_weight_variable(w_shape, n)
+            b = self._get_bias_variable(b_shape, n)
+            weights.append(w)
+            biases.append(b)
 
     def _setup_training(self):
         """
