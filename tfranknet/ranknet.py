@@ -33,7 +33,7 @@ class RankNet(BaseEstimator):
 
     def __init__(self, hidden_units, batch_size=32, activate_func="relu",
                  learning_rate=0.01, max_steps=1000, sigma=1.0,
-                 logdir=None, q_capacity=1000000, min_after_dequeue=100,
+                 q_capacity=100000, min_after_dequeue=100,
                  threads=4, verbose=False, initialize=True):
         if not activate_func in ACTIVATE_FUNC:
             raise ValueError("'activate_func' must be in"
@@ -48,12 +48,11 @@ class RankNet(BaseEstimator):
         self.threads = threads
         self.verbose = verbose
         self.batch_size = batch_size
-        self.logdir = logdir
         self.layer_num = len(hidden_units) + 2
         self.initialize = initialize
         self.initialized = False
 
-    def fit(self, data, pretraining=True, label=None):
+    def fit(self, data, logdir=None, label=None):
         """Learn the ranking neural network
             The ranks of data1[i] are labeled higher than data2[i]
 
@@ -72,28 +71,34 @@ class RankNet(BaseEstimator):
         shape1 = tuple(data1.shape)
         shape2 = tuple(data2.shape)
 
-        self.fdim = shape1[1]
+        self.input_dim = shape1[1]
         self.data_size = shape1[0]
         if self.initialize or (not self.initialized):
             #prepare a training graph and initialize
-            self._setup_base_graph()
-            self._setup_training()
-            self._setup_prediction()
-            if pretraining:
-                self._setup_pretraining()
-            self.sess.run(self.init_op)
-            self.initialized = True
-        if pretraining:
-            #pretrain variables by stacked AutoEncoder
-            self.pretrain(np.append(data1, data2, axis=0))
+            self.initialize_graph(self.input_dim)
         #fine tuning
-        self._fine_tuning(data1, data2)
+        self._fine_tuning(data1, data2, logdir)
+
+    def initialize_graph(self, input_dim):
+        self.input_dim = input_dim
+        self._setup_base_graph()
+        self._setup_training()
+        self._setup_prediction()
+        self._setup_pretraining()
+        with self.graph.as_default():
+            self.sess = tf.Session()
+            self.init_op = tf.initialize_all_variables()
+            self.summary = tf.merge_all_summaries()
+            self.sess.run(self.init_op)
+        self.initialized = True
 
     def pretrain(self, data):
+        input_dim = data.shape[1]
+        data_size = data.shape[0]
+        self.initialize_graph(input_dim)
         layer_num = self.layer_num
         max_steps = self.max_steps
         batch_size = self.batch_size
-        data_size = data.shape[0]
         sess = self.sess
         pretrain_layer = self.pretrain_layer
         for n in xrange(layer_num-2):
@@ -105,11 +110,11 @@ class RankNet(BaseEstimator):
                 if start >= data_size:
                     break
                 batch = data[start: stop]
-                sess.run(pretrain_layer[n],
+                sess.run([pretrain_layer[n]],
                         feed_dict={self.pt_input: batch})
             data = sess.run(self.encode[n], feed_dict={self.pt_input: data})
 
-    def _fine_tuning(self, data1, data2):
+    def _fine_tuning(self, data1, data2, logdir):
         #set data to enqueue op(not executed yet)
         data1 = np.array(data1)
         data2 = np.array(data2)
@@ -123,8 +128,8 @@ class RankNet(BaseEstimator):
         sess = self.sess
         coord = tf.train.Coordinator()
         enqueue_threads = qr.create_threads(sess, coord=coord, start=True)
-        if self.logdir:
-            writer = tf.train.SummaryWriter(self.logdir, sess.graph_def)
+        if logdir:
+            writer = tf.train.SummaryWriter(logdir, sess.graph_def)
         #Run the training loop, controlling termination with the coord
         try:
             for step in xrange(self.max_steps):
@@ -134,7 +139,7 @@ class RankNet(BaseEstimator):
                                         self.optimize])
                 if self.verbose and step%100:
                     print("The %dth cost:%f"%(step, cost))
-                if self.logdir:
+                if logdir:
                     writer.add_summary(sm, step)
         except Exception as e:
             coord.request_stop(e)
@@ -172,38 +177,37 @@ class RankNet(BaseEstimator):
         """
         self.graph = tf.Graph()
         with self.graph.as_default() as g:
-            fdim = self.fdim
+            input_dim = self.input_dim
             batch_size = self.batch_size
             hidden_units = self.hidden_units
-            layer_units = [fdim] + hidden_units + [1]
+            layer_units = [input_dim] + hidden_units + [1]
             layer_num = len(layer_units)
 
             #make Queue for getting batch
             self.queue = q = tf.RandomShuffleQueue(capacity=self.q_capacity,
                                         min_after_dequeue=self.min_after_dequeue,
                                         dtypes=["float", "float"],
-                                        shapes=[[fdim], [fdim]])
+                                        shapes=[[input_dim], [input_dim]])
             #input data
             self.data1, self.data2 = q.dequeue_many(batch_size, name="inputs")
 
-            self._setup_variables()
-            #Create session and inialize variables
-            self.init_op = tf.initialize_all_variables()
-            self.sess = tf.Session()
+        self._setup_variables()
 
     def _setup_variables(self):
-        hidden_units = self.hidden_units
-        layer_num = len(hidden_units) + 2
-        #setting weights and biases
-        self.weights = weights = []
-        self.biases = biases = []
-        for n in xrange(layer_num-1):
-            w_shape = [layer_units[n], layer_units[n+1]]
-            b_shape = [layer_units[n+1]]
-            w = self._get_weight_variable(w_shape, n)
-            b = self._get_bias_variable(b_shape, n)
-            weights.append(w)
-            biases.append(b)
+        with self.graph.as_default() as g:
+            hidden_units = self.hidden_units
+            layer_units = [self.input_dim] + hidden_units + [1]
+            layer_num = len(layer_units)
+            #setting weights and biases
+            self.weights = weights = []
+            self.biases = biases = []
+            for n in xrange(layer_num-1):
+                w_shape = [layer_units[n], layer_units[n+1]]
+                b_shape = [layer_units[n+1]]
+                w = self._get_weight_variable(w_shape, n)
+                b = self._get_bias_variable(b_shape, n)
+                weights.append(w)
+                biases.append(b)
 
     def _setup_training(self):
         """
@@ -233,14 +237,13 @@ class RankNet(BaseEstimator):
                 tf.histogram_summary("weight"+str(n), weights[n])
                 tf.histogram_summary("bias"+str(n), biases[n])
             tf.scalar_summary("cost", cost)
-            self.summary = tf.merge_all_summaries()
 
     def _setup_pretraining(self):
         """
         Set up a data flow graph for pretraining by sAE
         """
         with self.graph.as_default():
-            fdim = self.fdim
+            input_dim = self.input_dim
             weights = self.weights
             biases = self.biases
             layer_num = self.layer_num
@@ -264,7 +267,6 @@ class RankNet(BaseEstimator):
                     opt_op = optimizer.minimize(recon_err)
                     self.pretrain_layer.append(opt_op)
                     self.encode.append(encoded)
-            self.init_op = tf.initialize_all_variables()
 
     @classmethod
     def _get_reconstruction_error(cls, input_, weight, bias, act_func, label):
@@ -285,10 +287,10 @@ class RankNet(BaseEstimator):
 
     def _setup_prediction(self):
         with self.graph.as_default():
-            fdim = self.fdim
-            self.input1 = inp1 = tf.placeholder("float", shape=[None,fdim],
+            input_dim = self.input_dim
+            self.input1 = inp1 = tf.placeholder("float", shape=[None,input_dim],
                                                 name="input1")
-            self.input2 = inp2 = tf.placeholder("float", shape=[None,fdim],
+            self.input2 = inp2 = tf.placeholder("float", shape=[None,input_dim],
                                                 name="input2")
             weights = self.weights
             biases = self.biases
@@ -331,13 +333,37 @@ class RankNet(BaseEstimator):
         return b
 
 
-    def _set_weight(self, weight, layer):
-        assign_op = self.weights[layer].assign(weight)
+    def set_weight(self, weight, layer=None):
+        if layer is None:
+            assign_op = [self.weights[n].assign(weight[n])
+                              for n in xrange(self.layer_num-1)]
+        else:
+            assign_op = self.weights[layer].assign(weight)
         self.sess.run(assign_op)
 
-    def _set_bias(self, bias, layer):
-        assign_op = self.biases[layer].assign(bias)
+    def set_bias(self, bias, layer=None):
+        if layer is None:
+            assign_op = [self.biases[n].assign(bias[n])
+                              for n in xrange(self.layer_num-1)]
+        else:
+            assign_op = self.biases[layer].assign(bias)
         self.sess.run(assign_op)
+
+    def get_weight(self, layer=None):
+        if layer is None:
+            weights = [self.sess.run(self.weights[n])
+                        for n in xrange(self.layer_num-1)]
+            return weights
+        else:
+            return self.sess.run(self.weights[layer])
+
+    def get_bias(self, layer=None):
+        if layer is None:
+            biases = [self.sess.run(self.biases[n])
+                       for n in xrange(self.layer_num-1)]
+            return biases
+        else:
+            return self.sess.run(self.biases[layer])
 
     @staticmethod
     def unpack_data(data):
