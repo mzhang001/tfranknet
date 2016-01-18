@@ -15,6 +15,7 @@ rn.pretrain(data1)
 
 rn.fit(data, logdir="logfine")
 
+score = rn.get_scores(data1)
 
 
 if False:

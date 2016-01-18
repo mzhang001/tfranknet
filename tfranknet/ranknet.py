@@ -152,7 +152,7 @@ class RankNet(BaseEstimator):
         """Predict whether data1[i] is higher rank than data2[i]
         """
         prob = self.predict_prob(data)
-        pred = (prob >= 0.5)
+        pred = (prob > 0.5)
         return pred
 
     def predict_prob(self, data):
