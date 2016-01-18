@@ -19,6 +19,9 @@ import tensorflow as tf
 ACTIVATE_FUNC = {"relu": tf.nn.relu,
                  "sigmoid": tf.nn.sigmoid}
 
+OPTIMIZER = {"sgd": tf.train.GradientDescentOptimizer,
+             "adam": tf.train.AdamOptimizer}
+
 class RankNet(BaseEstimator):
     """Class for RankNet
 
@@ -33,7 +36,7 @@ class RankNet(BaseEstimator):
 
     def __init__(self, hidden_units, batch_size=32, activate_func="relu",
                  learning_rate=0.01, max_steps=1000, sigma=1.0,
-                 q_capacity=1000000, min_after_dequeue=100,
+                 q_capacity=1000000, min_after_dequeue=100, optimizer="sgd",
                  threads=8, verbose=False, initialize=True):
         if not activate_func in ACTIVATE_FUNC:
             raise ValueError("'activate_func' must be in"
@@ -49,8 +52,10 @@ class RankNet(BaseEstimator):
         self.verbose = verbose
         self.batch_size = batch_size
         self.layer_num = len(hidden_units) + 2
+        self.optimizer = optimizer
         self.initialize = initialize
         self.initialized = False
+
 
     def fit(self, data, logdir=None, label=None):
         """Learn the ranking neural network
@@ -222,7 +227,7 @@ class RankNet(BaseEstimator):
             biases = self.biases
             data1, data2 = self.data1, self.data2
             batchsize = tf.to_float(data1.get_shape()[0])
-
+            optimizer = OPTIMIZER[self.optimizer]
             with tf.name_scope("training"):
                 s1 = self._obtain_score(data1, weights, biases, act_func, "1")
                 s2 = self._obtain_score(data2, weights, biases, act_func, "2")
@@ -231,8 +236,7 @@ class RankNet(BaseEstimator):
                     self.cost = cost = sum_cost / batchsize
 
             self.score = s1
-            optimizer = tf.train.GradientDescentOptimizer(lr)
-            self.optimize = optimizer.minimize(cost)
+            self.optimize = optimizer(lr).minimize(cost)
 
             for n in range(layer_num-1):
                 tf.histogram_summary("weight"+str(n), weights[n])
@@ -250,13 +254,13 @@ class RankNet(BaseEstimator):
             layer_num = self.layer_num
             lr = self.learning_rate
             act_func = ACTIVATE_FUNC[self.activate_func]
+            optimizer = OPTIMIZER[self.optimizer]
 
             self.pt_input = input_ = tf.placeholder("float", shape=[None, None],
                                                     name="input_to_ae")
             self.pretrain_layer = []
             self.encode = []
             with tf.name_scope("pretraing"):
-                optimizer = tf.train.GradientDescentOptimizer(lr)
                 for n in xrange(layer_num-2):
                     w = weights[n]
                     b = biases[n]
@@ -265,7 +269,7 @@ class RankNet(BaseEstimator):
                                                                         w, b,
                                                                         act_func,
                                                                         label)
-                    opt_op = optimizer.minimize(recon_err)
+                    opt_op = optimizer(lr).minimize(recon_err)
                     self.pretrain_layer.append(opt_op)
                     self.encode.append(encoded)
 
