@@ -87,9 +87,6 @@ class RankNet(BaseEstimator):
     def initialize_graph(self, input_dim):
         self.input_dim = input_dim
         self._setup_base_graph()
-        self._setup_training()
-        self._setup_prediction()
-        self._setup_pretraining()
         with self.graph.as_default():
             self.sess = tf.Session()
             self.init_op = tf.initialize_all_variables()
@@ -196,82 +193,98 @@ class RankNet(BaseEstimator):
             #input data
             self.data1, self.data2 = q.dequeue_many(batch_size, name="inputs")
 
-        self._setup_variables()
+            self._setup_variables()
+            self._setup_training()
+            self._setup_prediction()
+            self._setup_pretraining()
+
 
     def _setup_variables(self):
-        with self.graph.as_default() as g:
-            hidden_units = self.hidden_units
-            layer_units = [self.input_dim] + hidden_units + [1]
-            layer_num = len(layer_units)
-            #setting weights and biases
-            self.weights = weights = []
-            self.biases = biases = []
-            for n in xrange(layer_num-1):
-                w_shape = [layer_units[n], layer_units[n+1]]
-                b_shape = [layer_units[n+1]]
-                w = self._get_weight_variable(w_shape, n)
-                b = self._get_bias_variable(b_shape, n)
-                weights.append(w)
-                biases.append(b)
+        hidden_units = self.hidden_units
+        layer_units = [self.input_dim] + hidden_units + [1]
+        layer_num = len(layer_units)
+        #setting weights and biases
+        self.weights = weights = []
+        self.biases = biases = []
+        for n in xrange(layer_num-1):
+            w_shape = [layer_units[n], layer_units[n+1]]
+            b_shape = [layer_units[n+1]]
+            w = self._get_weight_variable(w_shape, n)
+            b = self._get_bias_variable(b_shape, n)
+            weights.append(w)
+            biases.append(b)
 
     def _setup_training(self):
         """
         Set up a data flow graph for fine tuning
         """
-        with self.graph.as_default() as g:
-            layer_num = self.layer_num
-            act_func = ACTIVATE_FUNC[self.activate_func]
-            sigma = self.sigma
-            lr = self.learning_rate
-            weights = self.weights
-            biases = self.biases
-            data1, data2 = self.data1, self.data2
-            batchsize = tf.to_float(data1.get_shape()[0])
-            optimizer = OPTIMIZER[self.optimizer]
-            with tf.name_scope("training"):
-                s1 = self._obtain_score(data1, weights, biases, act_func, "1")
-                s2 = self._obtain_score(data2, weights, biases, act_func, "2")
-                with tf.name_scope("cost"):
-                    sum_cost = tf.reduce_sum(tf.log(1 + tf.exp(-sigma*(s1-s2))))
-                    self.cost = cost = sum_cost / batchsize
+        layer_num = self.layer_num
+        act_func = ACTIVATE_FUNC[self.activate_func]
+        sigma = self.sigma
+        lr = self.learning_rate
+        weights = self.weights
+        biases = self.biases
+        data1, data2 = self.data1, self.data2
+        batch_size = self.batch_size
+        optimizer = OPTIMIZER[self.optimizer]
+        with tf.name_scope("training"):
+            s1 = self._obtain_score(data1, weights, biases, act_func, "1")
+            s2 = self._obtain_score(data2, weights, biases, act_func, "2")
+            with tf.name_scope("cost"):
+                sum_cost = tf.reduce_sum(tf.log(1 + tf.exp(-sigma*(s1-s2))))
+                self.cost = cost = sum_cost / batch_size
+        self.optimize = optimizer(lr).minimize(cost)
 
-            self.score = s1
-            self.optimize = optimizer(lr).minimize(cost)
-
-            for n in range(layer_num-1):
-                tf.histogram_summary("weight"+str(n), weights[n])
-                tf.histogram_summary("bias"+str(n), biases[n])
-            tf.scalar_summary("cost", cost)
+        for n in range(layer_num-1):
+            tf.histogram_summary("weight"+str(n), weights[n])
+            tf.histogram_summary("bias"+str(n), biases[n])
+        tf.scalar_summary("cost", cost)
 
     def _setup_pretraining(self):
         """
         Set up a data flow graph for pretraining by sAE
         """
-        with self.graph.as_default():
-            input_dim = self.input_dim
-            weights = self.weights
-            biases = self.biases
-            layer_num = self.layer_num
-            lr = self.learning_rate
-            act_func = ACTIVATE_FUNC[self.activate_func]
-            optimizer = OPTIMIZER[self.optimizer]
+        input_dim = self.input_dim
+        weights = self.weights
+        biases = self.biases
+        layer_num = self.layer_num
+        lr = self.learning_rate
+        act_func = ACTIVATE_FUNC[self.activate_func]
+        optimizer = OPTIMIZER[self.optimizer]
 
-            self.pt_input = input_ = tf.placeholder("float", shape=[None, None],
-                                                    name="input_to_ae")
-            self.pretrain_layer = []
-            self.encode = []
-            with tf.name_scope("pretraing"):
-                for n in xrange(layer_num-2):
-                    w = weights[n]
-                    b = biases[n]
-                    label = str(n)
-                    encoded, recon_err = self._get_reconstruction_error(input_,
-                                                                        w, b,
-                                                                        act_func,
-                                                                        label)
-                    opt_op = optimizer(lr).minimize(recon_err)
-                    self.pretrain_layer.append(opt_op)
-                    self.encode.append(encoded)
+        self.pt_input = input_ = tf.placeholder("float", shape=[None, None],
+                                                name="input_to_ae")
+        self.pretrain_layer = []
+        self.encode = []
+        with tf.name_scope("pretraing"):
+            for n in xrange(layer_num-2):
+                w = weights[n]
+                b = biases[n]
+                label = str(n)
+                encoded, recon_err = self._get_reconstruction_error(input_,
+                                                                    w, b,
+                                                                    act_func,
+                                                                    label)
+                opt_op = optimizer(lr).minimize(recon_err)
+                self.pretrain_layer.append(opt_op)
+                self.encode.append(encoded)
+
+    def _setup_prediction(self):
+        input_dim = self.input_dim
+        self.input1 = inp1 = tf.placeholder("float", shape=[None,input_dim],
+                                            name="input1")
+        self.input2 = inp2 = tf.placeholder("float", shape=[None,input_dim],
+                                            name="input2")
+        weights = self.weights
+        biases = self.biases
+        act_func = ACTIVATE_FUNC[self.activate_func]
+        sigma = self.sigma
+        with tf.name_scope("prediction"):
+            s1 = self._obtain_score(inp1, weights, biases, act_func, "1")
+            s2 = self._obtain_score(inp2, weights, biases, act_func, "2")
+            self.score = s1
+            with tf.name_scope("probability"):
+                self.prob = 1 / (1 + tf.exp(-sigma*(s1-s2)))
 
     @classmethod
     def _get_reconstruction_error(cls, input_, weight, bias, act_func, label):
@@ -290,22 +303,7 @@ class RankNet(BaseEstimator):
         return encoded, loss
 
 
-    def _setup_prediction(self):
-        with self.graph.as_default():
-            input_dim = self.input_dim
-            self.input1 = inp1 = tf.placeholder("float", shape=[None,input_dim],
-                                                name="input1")
-            self.input2 = inp2 = tf.placeholder("float", shape=[None,input_dim],
-                                                name="input2")
-            weights = self.weights
-            biases = self.biases
-            act_func = ACTIVATE_FUNC[self.activate_func]
-            sigma = self.sigma
-            with tf.name_scope("prediction"):
-                s1 = self._obtain_score(inp1, weights, biases, act_func, "1")
-                s2 = self._obtain_score(inp2, weights, biases, act_func, "2")
-                with tf.name_scope("probability"):
-                    self.prob = 1 / (1 + tf.exp(-sigma*(s1-s2)))
+
 
     @classmethod
     def _obtain_score(cls, data, weights, biases, act_func, label):
