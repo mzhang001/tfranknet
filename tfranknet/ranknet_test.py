@@ -11,10 +11,10 @@ label = [True]*1000
 rn = RankNet(hidden_units=[20, 10],
              learning_rate=0.01, verbose=True)
 data = rn.pack_data(data1, data2)
-rn.pretrain(data1)
-
-rn.fit(data, logdir="logfine")
-
+err = rn.pretrain(data1)
+print("Reconstruction Error", err)
+cost = rn.fit(data, logdir="logfine")
+print("Cost", cost)
 score = rn.get_scores(data1)
 
 

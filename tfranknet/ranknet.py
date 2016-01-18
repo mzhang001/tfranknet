@@ -82,8 +82,8 @@ class RankNet(BaseEstimator):
         if self.initialize or (not self.initialized):
             #prepare a training graph and initialize
             self.initialize_graph(self.input_dim)
-        #fine tuning
-        self._fine_tuning(data1, data2, logdir)
+        #fine tuning returning the last cost
+        return self._fine_tuning(data1, data2, logdir)
 
     def initialize_graph(self, input_dim):
         self.input_dim = input_dim
@@ -104,6 +104,7 @@ class RankNet(BaseEstimator):
         batch_size = self.batch_size
         sess = self.sess
         pretrain_layer = self.pretrain_layer
+        recon_errs = []
         for n in xrange(layer_num-2):
             np.random.shuffle(data)
             #train loop
@@ -119,6 +120,8 @@ class RankNet(BaseEstimator):
                 if step%self.verbose_step == 0 and self.verbose:
                     print("Reconstruction Error:", mean_err)
             data = sess.run(self.encode[n], feed_dict={self.pt_input: data})
+            recon_errs.append(mean_err)
+        return recon_errs
 
     def _fine_tuning(self, data1, data2, logdir):
         #set data to enqueue op(not executed yet)
@@ -151,6 +154,7 @@ class RankNet(BaseEstimator):
             coord.request_stop(e)
         coord.request_stop()
         coord.join(enqueue_threads)
+        return cost
 
     def predict(self, data):
         """Predict whether data1[i] is higher rank than data2[i]
