@@ -33,8 +33,8 @@ class RankNet(BaseEstimator):
 
     def __init__(self, hidden_units, batch_size=32, activate_func="relu",
                  learning_rate=0.01, max_steps=1000, sigma=1.0,
-                 q_capacity=100000, min_after_dequeue=100,
-                 threads=4, verbose=False, initialize=True):
+                 q_capacity=1000000, min_after_dequeue=100,
+                 threads=8, verbose=False, initialize=True):
         if not activate_func in ACTIVATE_FUNC:
             raise ValueError("'activate_func' must be in"
                             "['rele', 'sigmoid'")
