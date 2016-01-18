@@ -9,7 +9,7 @@ data2 = np.random.rand(1000, 30)
 label = [True]*1000
 
 rn = RankNet(hidden_units=[20, 10],
-             learning_rate=0.01)
+             learning_rate=0.01, verbose=True)
 data = rn.pack_data(data1, data2)
 rn.pretrain(data1)
 

@@ -37,7 +37,7 @@ class RankNet(BaseEstimator):
     def __init__(self, hidden_units, batch_size=32, activate_func="relu",
                  learning_rate=0.01, max_steps=1000, sigma=1.0,
                  q_capacity=1000000, min_after_dequeue=100, optimizer="sgd",
-                 threads=8, verbose=False, initialize=True):
+                 threads=8, verbose=False, verbose_step=100, initialize=True):
         if not activate_func in ACTIVATE_FUNC:
             raise ValueError("'activate_func' must be in"
                             "['rele', 'sigmoid'")
@@ -50,6 +50,7 @@ class RankNet(BaseEstimator):
         self.min_after_dequeue = min_after_dequeue
         self.threads = threads
         self.verbose = verbose
+        self.verbose_step = verbose_step
         self.batch_size = batch_size
         self.layer_num = len(hidden_units) + 2
         self.optimizer = optimizer
@@ -112,8 +113,11 @@ class RankNet(BaseEstimator):
                 if start >= data_size:
                     break
                 batch = data[start: stop]
-                sess.run([pretrain_layer[n]],
+                _, err = sess.run([pretrain_layer[n], self.recon_errs[n]],
                         feed_dict={self.pt_input: batch})
+                mean_err = err / batch.shape[0]
+                if step%self.verbose_step == 0 and self.verbose:
+                    print("Reconstruction Error:", mean_err)
             data = sess.run(self.encode[n], feed_dict={self.pt_input: data})
 
     def _fine_tuning(self, data1, data2, logdir):
@@ -139,7 +143,7 @@ class RankNet(BaseEstimator):
                     break
                 cost, sm, _ = sess.run([self.cost, self.summary,
                                         self.optimize])
-                if self.verbose and step%100:
+                if self.verbose and step%self.verbose_step==0:
                     print("The %dth cost:%f"%(step, cost))
                 if logdir:
                     writer.add_summary(sm, step)
@@ -256,6 +260,7 @@ class RankNet(BaseEstimator):
                                                 name="input_to_ae")
         self.pretrain_layer = []
         self.encode = []
+        self.recon_errs = []
         with tf.name_scope("pretraing"):
             for n in xrange(layer_num-2):
                 w = weights[n]
@@ -268,6 +273,7 @@ class RankNet(BaseEstimator):
                 opt_op = optimizer(lr).minimize(recon_err)
                 self.pretrain_layer.append(opt_op)
                 self.encode.append(encoded)
+                self.recon_errs.append(recon_err)
 
     def _setup_prediction(self):
         input_dim = self.input_dim
